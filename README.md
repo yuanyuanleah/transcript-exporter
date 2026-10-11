@@ -4,7 +4,7 @@
 
 **元元 Leah 整理分享 · 豆包工作专用 · 个人学习与研究**
 
-[快速开始](#快速开始) · [完整使用指南](USAGE_GUIDE.md) · [下载最新版 ZIP](https://github.com/yuanyuanleah/transcript-exporter/archive/refs/heads/main.zip) · [反馈问题](https://github.com/yuanyuanleah/transcript-exporter/issues)
+[快速开始](#快速开始) · [完整使用指南](USAGE_GUIDE.md) · [更新记录](CHANGELOG.md) · [下载最新版 ZIP](https://github.com/yuanyuanleah/transcript-exporter/archive/refs/heads/main.zip) · [反馈问题](https://github.com/yuanyuanleah/transcript-exporter/issues)
 
 ## 能帮你做什么
 
