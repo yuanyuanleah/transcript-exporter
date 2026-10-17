@@ -11,12 +11,12 @@ lark-cli api GET /open-apis/authen/v1/user_info --as user
 - 沙箱环境的 lark-cli 可能登录的是测试账号（如"来点羊蝎子"），无用户文档权限。
 
 ### 路径优先级
-1. **优先使用系统 lark-cli**：Mac 默认 `/opt/homebrew/bin/lark-cli`，Windows 用 `where lark-cli` 查找。
+1. **使用当前可用且已授权的 lark-cli**：先用 `command -v lark-cli`（Mac）或 `where lark-cli`（Windows）定位；Mac 常见安装位置包括 `/opt/homebrew/bin/lark-cli`、`~/.local/bin/lark-cli`。
 2. **沙箱 lark-cli 作为备选**：系统 lark-cli 不存在时使用沙箱版本。
-3. 两种身份都无目标表格权限时，告知用户需要在飞书文档中添加协作者或切换 lark-cli 登录账号。
+- 先确认身份属于用户本人；不同路径对应不同用户/机器人时不自动切换。权限受阻先交付本地缓存，说明写表尚未完成；只有用户明确要求时才更换身份或修改权限。
 
 ### 版本要求
-- lark-cli 1.0.88+ 支持完整的 base shortcut 命令。
+- 使用支持本任务所需命令的 lark-cli；仅在首次使用某命令或参数不匹配时检查 `--help`，不要每条记录重复检查。本文主要示例已对照本机 CLI 帮助核验。
 - 查看版本：`lark-cli --version`
 
 ## 表格链接解析
@@ -43,6 +43,19 @@ lark-cli base +url-resolve --url "<表格URL>" --as user
 | invalid url | URL 格式不正确 | 检查是否为有效的飞书 wiki/base 链接 |
 
 ## 字段管理
+
+### 新建数据表或 Base（用户需要时）
+
+已有目标表直接复用。用户指定在已有 Base 中建新表时，用其真实 base_token：
+
+```bash
+lark-cli base +table-create --base-token <token> --name "视频记录" \
+  --fields @./fields.json --as user
+```
+
+`fields.json` 是 11 字段模板的 JSON 数组，首项“标题”为主字段；首次使用时按当前命令帮助确认文件引用方式，不支持 @file 时传入实际 JSON 数组。需要全新 Base 时使用当前 CLI 的 `+base-create --name ... --table-name ... --fields ...`；不误用 BaseApp 的 app-create。已给定 Base 却缺具体表时，只在多个候选无法判定且用户未授权新建时询问。
+
+只保存本地不执行本文件的飞书命令。权限受阻保存缓存并报告，不自动换成另一个用户/机器人身份。
 
 ### 查看现有字段
 ```bash
@@ -164,10 +177,11 @@ lark-cli base +record-batch-create ... --json @./records.json --as user
 ### 获取已有记录
 ```bash
 lark-cli base +record-list --base-token <token> --table-id <id> \
-  --limit 500 --as user
+  --limit 200 --offset 0 --format ndjson --output ./existing-000.ndjson --as user
 ```
-- 返回 `data.data`（二维数组）和 `data.fields`（字段名列表）。
-- 找到"视频链接"字段的索引，提取所有已有视频链接。
+- NDJSON 每行含 `record_id` 和按字段名读取的值，stdout/manifest 提供 `records_count` 与 `has_more`。按当前作者筛选，读取视频链接、账号和需要修复的字段；复用本轮已读数据，不反复导出全表。
+- `has_more=true` 时按实际已读条数推进 offset，用不同文件名继续，直到无下一页；返回空页但仍声称有更多时停止并报告映射不完整，不冒充全表已核对。JSON 模式的 limit 为 1–200，不能使用 500。
+- 提取规范化视频 ID → record_id 映射。首次写入前建立映射；每批成功后更新本地映射。创建响应不明时按本批视频 ID 复查，避免重复新增。
 
 ### 去重判断
 ```python
@@ -177,11 +191,18 @@ new_records = [v for v in 采集结果 if v['url'] not in existing_urls]
 - 按完整视频 URL 去重（`https://www.douyin.com/video/<video_id>`）。
 - 也可按 video_id 去重（从 URL 中提取数字部分）。
 
-### 全量覆盖模式
-用户明确要求"全量覆盖"或"重新导入"时：
-1. 先删除表格中该账号的所有旧记录（按账号名称筛选）。
-2. 再批量写入全部采集结果。
-3. 或者直接追加，由用户自行清理重复数据。
+### 全量覆盖与补齐
+
+用户要求“全量覆盖 / 重新导入”时，按视频 ID 更新已有记录并新增未存在的视频，保留本轮未采到的旧记录。不要自动先删后建或直接重复追加；已有完整记录默认跳过，逐字稿失败记录在修复后更新同一 record_id。
+
+批量更新示例（每次不超过 200 条）：
+
+```bash
+lark-cli base +record-batch-update --base-token <token> --table-id <id> \
+  --json '{"update_records":{"rec_existing":{"逐字稿":"真实完整正文"}}}' --as user
+```
+
+`+record-upsert` 不会自动按视频 URL 寻找已有记录，带真实 record_id 才是更新。更新响应可能不验证 ID 存在，需要确认时本批统一读回一次；不要每条重新读全表。
 
 ## 常见错误与恢复
 
@@ -198,41 +219,13 @@ new_records = [v for v in 采集结果 if v['url'] not in existing_urls]
 
 ## 验证写入结果
 
-写入完成后，必须执行数据质量验证（不只是抽样1-2条）：
+写前对缓存统一校验一次：真实视频链接、字段类型、逐字稿来源与状态。以主文件 Step 3 的完整性规则为准，正常正文中的关键词和短正文不单独判失败。可确定的无口播、主动跳过、原文缺介绍或获取失败允许留空并记录原因；未知互动数不填 0。
 
-### 1. 全量占位符检查
-用 `+record-list` 读取本次新写入的所有记录，检查逐字稿字段：
-```python
-# 检查是否包含占位符文字
-placeholder_keywords = ["完整内容", "web.fetch", "已通过", "内容已获取", "获取完整"]
-for record in new_records:
-    transcript = str(record.get("逐字稿", ""))
-    for kw in placeholder_keywords:
-        if kw in transcript:
-            print(f"⚠️ 发现占位符: {record['标题']} - 包含 '{kw}'")
-            # 必须重新获取该条逐字稿并更新
-```
-- **发现占位符必须立即修复**：重新调用 web.fetch（分页读取完整内容）或回退妙记链路，然后用 `+record-batch-update` 更新对应记录。
+创建成功响应和返回的 record_id 可确认新增，无需每条读表。更新响应不足以确认、字段被忽略或请求超时结果不明时，完成本批后按本批记录统一读回一次；短暂等待后最多复查一次。正文仍失败只修复一次并记录原因，不要求“所有字段全通过”才交付。
 
-### 2. 长度与空值检查
-- 逐字稿字段：非纯音乐/无口播视频应 > 50 字；过短说明可能被截断，需重新获取。
-- 标题/介绍/视频链接/发表日期/账号名称：关键字段不应为空。
-- 点赞/评论/转发：应为数字类型，不能带"万"字。
-
-### 3. 抽样详细验证
-抽样1-2条记录用 `+record-get` 详细检查：
-```bash
-lark-cli base +record-get --base-token <token> --table-id <id> \
-  --record-id <record_id> --as user
-```
-- 检查各字段值是否正确（尤其是单选字段、日期字段、长文本字段）。
-- 确认记录总数与预期一致。
-
-### 4. 验证不通过的处理
-- 占位符问题：重新获取完整逐字稿 → 更新记录 → 再次验证。
-- 长度过短：检查是否为纯音乐视频，否则重新获取。
-- 关键字段为空：重新采集该条数据的对应字段。
-- 所有问题修复后，重新执行验证直到全部通过。
+- 更新失败保留完整缓存，下次按 record_id 恢复。
+- 创建结果不明时先查询本批视频 ID，存在则更新/复用，不盲目重建。
+- 写入受阻交付本地基础数据，报告飞书输出尚未完成；分析可以使用本地缓存继续。
 
 ---
 
@@ -244,26 +237,26 @@ lark-cli base +record-get --base-token <token> --table-id <id> \
 
 ```
 douyin_data/
-└── {博主昵称}_{日期}_{数量}条/
+└── {安全昵称或作者ID}_{日期}_{批次标识}/
     ├── 01_{video_id}.md
     ├── 02_{video_id}.md
     ├── 03_{video_id}.md
     ├── ...
-    └── _all.json          （可选，汇总所有数据的 JSON 文件）
+    └── _all.json          （必需，汇总本批结果与状态）
 ```
 
 ### 批次目录命名
 
 - **根目录**：当前工作目录下的 `douyin_data/` 文件夹。
 - **批次子目录**：`{博主昵称}_{采集日期YYYYMMDD}_{视频数量}条/`
-  - 示例：`瑶瑶_20260827_50条/`
+  - 示例：`瑶瑶_20261016_batch01/`；同一任务续跑复用，不同任务使用不同批次标识。
 - 博主昵称含特殊字符时，替换为下划线或去掉特殊字符。
 - 每批采集单独建目录，不同批次互不干扰。
 
 ### 每个视频的 Markdown 文件
 
 - **文件命名**：`{序号}_{video_id}.md`
-  - 序号按采集顺序（最新在前）从 01 开始，不足10条用1位，超过99条用3位。
+  - 序号按本轮目标顺序从 01 开始，至少两位，超过 99 条用三位；Top 模式按点赞排名，最新模式按真实发布日期。
   - 示例：`01_7655189977860862854.md`、`02_7654993145986808761.md`
 
 - **文件内容格式**：
@@ -292,9 +285,9 @@ douyin_data/
   ```
 
 - 章节顺序固定：标题 → 基本信息 → 介绍/文案 → 选题方向 → 主题总结 → 逐字稿。
-- 逐字稿为空时（纯音乐/无口播视频），写"无逐字稿（视频无口播内容）"。
+- 逐字稿为空时按状态分别写“无口播内容”“用户跳过”或“获取失败：原因”；不能把获取失败标成无口播。跳过 AI 字段时可省略对应章节。
 
-### 汇总 JSON 文件（可选）
+### 汇总 JSON 文件（必需）
 
 在批次目录下同时保存 `_all.json`，包含所有视频的结构化数据，便于后续程序处理：
 
@@ -308,6 +301,8 @@ douyin_data/
     "标题": "你越强势，AI可能越蠢",
     "介绍": "很多人以为把要求说清楚AI就能做好...",
     "逐字稿": "你越强势，AI效果就越蠢。你一定听过一个观点...",
+    "transcript_status": "success",
+    "transcript_source": "web_fetch",
     "点赞": 3091,
     "评论": 78,
     "转发": 543,
@@ -328,10 +323,11 @@ import os
 data = [...]
 
 # 批次目录
-author = "瑶瑶"
-date = "20260827"
+author = "瑶瑶"  # 实际使用时将昵称中的路径分隔符替换为下划线
+date = "20261016"
+batch_id = "batch01"  # 新任务生成新标识，续跑从进度中读取
 count = len(data)
-batch_dir = f"douyin_data/{author}_{date}_{count}条"
+batch_dir = f"douyin_data/{author}_{date}_{batch_id}"
 os.makedirs(batch_dir, exist_ok=True)
 
 # 序号位数
@@ -345,7 +341,11 @@ for i, item in enumerate(data, 1):
 
     # 选题方向转为顿号分隔
     topics = item.get("选题方向", [])
-    topics_str = "、".join(topics) if topics else "无"
+    topics_str = "、".join(topics) if topics else "未生成"
+    status = item.get("transcript_status", "failed")
+    empty_text = {"skipped": "用户跳过", "not_applicable": "无口播内容"}.get(
+        status, "获取失败：" + item.get("transcript_error", "未取得完整逐字稿"))
+    transcript = item.get("逐字稿") or empty_text
 
     md_content = f"""# {item['标题']}
 
@@ -367,33 +367,31 @@ for i, item in enumerate(data, 1):
 {item.get('主题总结', '无')}
 
 ## 逐字稿
-{item.get('逐字稿', '无逐字稿（视频无口播内容）')}
+{transcript}
 """
-    with open(md_path, "w", encoding="utf-8") as f:
+    with open(md_path + ".tmp", "w", encoding="utf-8") as f:
         f.write(md_content)
+    os.replace(md_path + ".tmp", md_path)
+    with open(md_path, encoding="utf-8") as f:
+        assert f.read() == md_content
+    # 实际 Agent 此时更新本地文件输出信息；失败逐字稿仍保留 failed 状态。
 
-# 保存汇总 JSON（可选）
+# 保存汇总 JSON（必需）；实际逐条采集时每条缓存后刷新，而非只在末尾保存
 json_path = os.path.join(batch_dir, "_all.json")
-with open(json_path, "w", encoding="utf-8") as f:
+with open(json_path + ".tmp", "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
+os.replace(json_path + ".tmp", json_path)
 ```
 
 ### 本地保存的数据质量验证
 
-保存后必须执行验证：
+批次完成后统一核对一次：Markdown 数量是否等于实际已输出视频数、序号与视频 ID 对应、JSON 可读且包含完整结果和状态。逐字稿校验复用采集阶段结论，不因正常词语/短正文反复重采。
 
-1. **目录与文件数量检查**：批次目录已创建，Markdown 文件数量 = 预期采集数量。
-2. **文件命名检查**：文件名符合 `{序号}_{video_id}.md` 格式，序号连续无重复。
-3. **Markdown 结构检查**：抽样读取2-3个文件，确认包含所有章节（基本信息、介绍/文案、选题方向、主题总结、逐字稿）。
-4. **占位符检查**：逐字稿部分不包含"完整内容"、"web.fetch"、"已通过"等占位符文字。
-5. **长度检查**：非纯音乐视频的逐字稿 > 50 字；标题、介绍、视频链接、发表日期、账号名称不为空。
-6. **格式检查**：点赞、评论、转发为整数；发表日期格式为 `YYYY-MM-DD HH:MM`；选题方向为1-3个标签。
-
-验证不通过时，重新获取对应数据并更新 Markdown 文件，直到全部通过。
+本地写入错误最多重写缓存一次；仍失败报告具体文件和原因。无口播、主动跳过或获取失败均允许带状态交付，缺介绍/日期等原始信息时如实留空，不无限修复。
 
 ### 交付文件
 
 验证通过后，用 `present_files` 工具将批次目录交付给用户：
 - 说明批次目录路径、视频数量、文件结构（每个视频一个 Markdown 文件，含基本信息、介绍、选题方向、主题总结、逐字稿）。
 - 如有逐字稿获取失败的记录，在交付说明中标注对应文件名。
-- 如有汇总 JSON 文件，一并说明。
+- 一并交付必需的 `_all.json`；`present_files` 不支持目录时打包或给出可用文件路径，不重新采集。
